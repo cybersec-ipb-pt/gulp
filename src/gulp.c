@@ -70,8 +70,11 @@
 
 #define _GNU_SOURCE
 #ifdef linux
+
 #include <syscall.h>
+
 #endif
+
 #include <unistd.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -82,84 +85,87 @@
 #include <errno.h>
 #include <signal.h>
 #include <sched.h>
-#include <sys/time.h>
 #include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <sys/wait.h>
+#include "settings.h"
 
-#define gettid() syscall(__NR_gettid)	/* missing in headers? */
-#define RINGSIZE 1024*1024*100	/* about 5 seconds of data at 200Mb/s */
-#define MAXPKT 16384		/* larger than any jumbogram */
-#define WRITESIZE 65536		/* usual write chunk size - must be 2^N */
-#define GRE_HDRLEN 50		/* Cisco GRE encapsulation header size */
-#define SNAP_LEN 65535		/* apparently what tcpdump uses for -s 0 */
-#define READ_PRIO	-15	/* niceness value for Reader thread */
-#define WRITE_PRIO	10	/* niceness value for Writer thread */
-#define READER_CPU	1	/* assign Reader thread to this CPU */
-#define WRITER_CPU	0	/* assign Writer thread to this CPU */
-#define POLL_USECS	1000	/* ring full/empty poll interval */
+#include <librdkafka/rdkafka.h>
+
+#define gettid() syscall(__NR_gettid)    /* missing in headers? */
+#define MAXPKT 16384        /* larger than any jumbogram */
+#define GRE_HDRLEN 50        /* Cisco GRE encapsulation header size */
+#define READ_PRIO    -15    /* niceness value for Reader thread */
+#define WRITE_PRIO    10    /* niceness value for Writer thread */
+#define READER_CPU    1    /* assign Reader thread to this CPU */
+#define WRITER_CPU    0    /* assign Writer thread to this CPU */
+#define POLL_USECS    1000    /* ring full/empty poll interval */
 #ifdef RHEL3
 # define my_sched_setaffinity(a,b,c) sched_setaffinity(a, c)
 #else
-# define my_sched_setaffinity(a,b,c) sched_setaffinity(a, b, c)
+# define my_sched_setaffinity(a, b, c) sched_setaffinity(a, b, c)
 #endif /* RHEL3 */
-#define V_WIDTH		10	/* minimum size of -V ps status field */
-#define TEMPLATE "/gulp.XXXXXX"	/* mktemp template for files in -o dir */
+#define V_WIDTH        10    /* minimum size of -V ps status field */
+#define TEMPLATE "/gulp.XXXXXX"    /* mktemp template for files in -o dir */
 
-#define RMEM_MAX "/proc/sys/net/core/rmem_max"		/* system tuning */
-#define RMEM_DEF "/proc/sys/net/core/rmem_default"	/* system tuning */
-#define RMEM_SUG 4194304				/* suggested value */
-FILE *procf; int rmem_def=RMEM_SUG, rmem_max=RMEM_SUG;	/* check tuning */
+#define RMEM_MAX "/proc/sys/net/core/rmem_max"        /* system tuning */
+#define RMEM_DEF "/proc/sys/net/core/rmem_default"    /* system tuning */
+#define RMEM_SUG 4194304                /* suggested value */
+FILE *procf;
+int rmem_def = RMEM_SUG, rmem_max = RMEM_SUG;    /* check tuning */
 
-int  WriteSize = WRITESIZE;	/* desired size for aligned writes */
-int  snap_len = SNAP_LEN;	/* requested limit on packet capture size */
-int  d_snap_len = SNAP_LEN;	/* actual limit on packet capture size */
-int  poll_usecs = POLL_USECS;	/* ring full/empty poll interval */
-int  just_copy = 0;		/* read from stdin instead of eth# */
-int  captured = 0;		/* number of packets captured for stats */
-int  ignored = 0;		/* number of packets !decapsulated for stats */
-int  maxbuffered = 0;		/* maximum number of bytes ring buffered */
-int  ringsize = RINGSIZE;	/* ring buffer size */
-int  gre_hdrlen = 0;		/* decapsulation header length */
-char *dev = "eth1";		/* capture interface device name */
-char *filter_exp = "";		/* decapsulation filter expression */
-char *buf;			/* pointer to the big malloc'd ring buffer */
-int  volatile start, end;	/* index of first, next byte in buf */
-int  volatile boundary = -2;	/* index in buf to start a new output file */
-int  push, eof;			/* flags for inter-thread communication */
-char *progname;			/* argv[0] for error messages from threads */
-int  warn_buf_full = 1;		/* unless reading a file, warn if buf fills */
-pcap_t *handle = 0;		/* packet capture handle */
-struct pcap_stat pcs;		/* packet capture filter stats */
-int got_stats = 0;		/* capture stats have been obtained */
+int WriteSize = WRITESIZE;    /* desired size for aligned writes */
+int snap_len = SNAP_LEN;    /* requested limit on packet capture size */
+int d_snap_len = SNAP_LEN;    /* actual limit on packet capture size */
+int poll_usecs = POLL_USECS;    /* ring full/empty poll interval */
+int packet_buffer_timeout = PACKET_BUFFER_TIMEOUT;
+int just_copy = 0;        /* read from stdin instead of eth# */
+int captured = 0;        /* number of packets captured for stats */
+int ignored = 0;        /* number of packets !decapsulated for stats */
+int maxbuffered = 0;        /* maximum number of bytes ring buffered */
+int ringsize = RINGSIZE;    /* ring buffer size */
+int gre_hdrlen = 0;        /* decapsulation header length */
+char *dev = "eth1";        /* capture interface device name */
+char *filter_exp = "";        /* decapsulation filter expression */
+char *buf;            /* pointer to the big malloc'd ring buffer */
+int volatile start, end;    /* index of first, next byte in buf */
+int volatile boundary = -2;    /* index in buf to start a new output file */
+int push, eof;            /* flags for inter-thread communication */
+char *progname;            /* argv[0] for error messages from threads */
+int warn_buf_full = 1;        /* unless reading a file, warn if buf fills */
+pcap_t *handle = 0;        /* packet capture handle */
+struct pcap_stat pcs;        /* packet capture filter stats */
+int got_stats = 0;        /* capture stats have been obtained */
 char *id = "@(#) Gulp RCS $Revision: 1.58-crox $"; /* automatically maintained */
-int  check_eth = 1;		/* check that we are capturing from an Ethernet device */
-int  would_block = 0;		/* for academic interest only */
-int  check_block = 0;		/* use select to see if writes would block */
-int  yield_if_blocking = 0;	/* experimental: may help on uniprocessors */
-char *ps_stat_ptr = 0;		/* loc to display buf percentage used */
-int  ps_stat_len = 0;		/* initial length of -V arg */
-int  xlock = 0;			/* set if exclusive lock requested */
-int  lockfd;			/* open descriptor to file to lock */
-char *odir = 0;			/* requested output directory name */
-char wfile[PATH_MAX];		/* output filename */
-char *oname = "pcap";		/* requested output file name */
-int  tflag = 0;			/* append timestamp to the file name */
-int  filec = 0;			/* output file number */
-struct pcap_file_header fh;	/* begins every pcap file */
-int  split_after = 10;		/* start new output file after # ringbufs */
-int  split_seconds = 0;		/* start new output file after # seconds */
+int check_eth = 1;        /* check that we are capturing from an Ethernet device */
+int would_block = 0;        /* for academic interest only */
+int check_block = 0;        /* use select to see if writes would block */
+int yield_if_blocking = 0;    /* experimental: may help on uniprocessors */
+char *ps_stat_ptr = 0;        /* loc to display buf percentage used */
+int ps_stat_len = 0;        /* initial length of -V arg */
+int xlock = 0;            /* set if exclusive lock requested */
+int lockfd;            /* open descriptor to file to lock */
+char *odir = 0;            /* requested output directory name */
+char wfile[PATH_MAX];        /* output filename */
+char *oname = "pcap";        /* requested output file name */
+int tflag = 0;            /* append timestamp to the file name */
+int filec = 0;            /* output file number */
+struct pcap_file_header fh;    /* begins every pcap file */
+int split_after = 10;        /* start new output file after # ringbufs */
+int split_seconds = 0;        /* start new output file after # seconds */
 time_t bdry_time = 0;           /* packet capture output file open time */
-int  time_split = 0;		/* 1 when time() - bdry_time > split_seconds */
-int  max_files = 0;		/* upper bound on filec */
-int  volatile reader_ready = 0;	/* reader thread no longer needs root */
+int time_split = 0;        /* 1 when time() - bdry_time > split_seconds */
+int max_files = 0;        /* upper bound on filec */
+int volatile reader_ready = 0;    /* reader thread no longer needs root */
 char *zcmd = NULL;              /* processes each savefile using a specified command */
-int  zflag = 0;
+int zflag = 0;
+
 static void child_cleanup(int); /* to avoid zombies, see below */
 
+rd_kafka_t *rk;
 
 /*
  * put data onto the end of global ring buffer "buf"
@@ -360,7 +366,7 @@ void *Reader(void *arg) {
             }
 #endif /* RHEL3 */
         } else
-            handle = pcap_open_live(dev, d_snap_len, 1, 0, errbuf);
+            handle = pcap_open_live(dev, d_snap_len, 1, packet_buffer_timeout, errbuf);
         if (handle == NULL) {
             fprintf(stderr, "%s: Couldn't open device %s: %s\n",
                     progname, dev, errbuf);
@@ -424,6 +430,17 @@ void *Reader(void *arg) {
 
         /* now we can set our callback function */
         pcap_loop(handle, num_packets, got_packet, NULL);
+
+        fprintf(stderr, "Flushing final messages\n");
+        rd_kafka_flush(rk, 10 * 1000 /* wait for max 10 seconds */);
+
+        /* If the output queue is still not empty there is an issue
+         * with producing messages to the clusters. */
+        if (rd_kafka_outq_len(rk) > 0)
+            fprintf(stderr, "%% %d message(s) were not delivered\n", rd_kafka_outq_len(rk));
+
+        /* Destroy kafka producer instance */
+        rd_kafka_destroy(rk);
 
         fprintf(stderr, "\n%d packets captured\n", captured);
         if (ignored > 0) {
@@ -670,7 +687,8 @@ void *Writer(void *arg) {
             if (start < boundary && start + writesize >= boundary) {
                 writesize = boundary - start;
             }
-            writesize = write(1, buf + start, writesize);
+            //writesize = write(1, buf + start, writesize);
+            // TODO publish to kafka here
         }
         if (writesize == -1 && errno == EINTR) writesize = 0;
         if (writesize < 0) {
@@ -730,12 +748,82 @@ void usage() {
             "\n", progname);
 }
 
+void kafka_produce_message(char *message, int length) {
+    rd_kafka_resp_err_t err;
+
+    retry:
+    err = rd_kafka_producev(
+            /* Producer handle */
+            rk,
+            /* Topic name */
+            RD_KAFKA_V_TOPIC(KAFKA_TOPIC),
+            /* Make a copy of the payload. */
+            RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
+            /* Message value and length */
+            RD_KAFKA_V_VALUE(message, length),
+            /* Per-Message opaque, provided in
+             * delivery report callback as
+             * msg_opaque. */
+            RD_KAFKA_V_OPAQUE(NULL),
+            /* End sentinel */
+            RD_KAFKA_V_END);
+
+    if (err) {
+        /*
+         * Failed to *enqueue* message for producing.
+         */
+        fprintf(stderr, "%% Failed to produce to topic %s: %s\n", KAFKA_TOPIC, rd_kafka_err2str(err));
+
+        if (err == RD_KAFKA_RESP_ERR__QUEUE_FULL) {
+            /* If the internal queue is full, wait for
+             * messages to be delivered and then retry.
+             * The internal queue represents both
+             * messages to be sent and messages that have
+             * been sent or failed, awaiting their
+             * delivery report callback to be called.
+             *
+             * The internal queue is limited by the
+             * configuration property
+             * queue.buffering.max.messages */
+            fprintf(stderr, "Local queue full, flushing messages and trying again...\n");
+            rd_kafka_poll(rk, 500/*block for max 1000ms*/);
+            goto retry;
+        }
+    }
+
+    rd_kafka_poll(rk, 0/*non-blocking*/);
+}
+
 /*
  * This thread starts the other two and then wakes every half second
  * to increment a variable the writer uses to decide if it should flush.
  * Flushing greatly facilitates interactive use and testing tcpdump filters.
  */
 int main(int argc, char *argv[], char *envp[]) {
+
+    // kafka init
+    char error_buffer[512];
+    rd_kafka_conf_t *conf;
+    conf = rd_kafka_conf_new();
+
+    if (rd_kafka_conf_set(conf, "bootstrap.servers", KAFKA_BROKERS, error_buffer, sizeof(error_buffer)) !=
+        RD_KAFKA_CONF_OK) {
+        fprintf(stderr, "Kafka config error: %s\n", error_buffer);
+        exit(1);
+    }
+
+    rd_kafka_conf_set(conf, "security.protocol", KAFKA_SECURE_PROTOCOL, error_buffer, sizeof(error_buffer));
+    rd_kafka_conf_set(conf, "ssl.certificate.location", CERTIFICATE_LOCATION, error_buffer, sizeof(error_buffer));
+    rd_kafka_conf_set(conf, "ssl.key.location", CERTIFICATE_KEY_LOCATION, error_buffer, sizeof(error_buffer));
+    rd_kafka_conf_set(conf, "ssl.ca.location", CA_CERTIFICATE_LOCATION, error_buffer, sizeof(error_buffer));
+
+    rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, error_buffer, sizeof(error_buffer));
+    if (!rk) {
+        fprintf(stderr,
+                "%% Failed to create kafka producer: %s\n", error_buffer);
+        exit(1);
+    }
+
     pthread_t threads[2];
     int rc, t, c, errflag = 0;
     extern char *optarg;
