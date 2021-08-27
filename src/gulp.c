@@ -97,6 +97,9 @@
 
 #define gettid() syscall(__NR_gettid)    /* missing in headers? */
 #define MAXPKT 16384        /* larger than any jumbogram */
+#define SNAP_LEN 65535        /* apparently what tcpdump uses for -s 0  */
+#define WRITESIZE 65536        /* usual write chunk size - must be 2^N (what we want: 524288) */
+#define PACKET_BUFFER_TIMEOUT 1000 /* set at 1000 works (original is 0)*/
 #define GRE_HDRLEN 50        /* Cisco GRE encapsulation header size */
 #define READ_PRIO    -15    /* niceness value for Reader thread */
 #define WRITE_PRIO    10    /* niceness value for Writer thread */
@@ -164,6 +167,7 @@ char *zcmd = NULL;              /* processes each savefile using a specified com
 int zflag = 0;
 
 static void child_cleanup(int); /* to avoid zombies, see below */
+void kafka_produce_message(char *, int);
 
 rd_kafka_t *rk;
 
@@ -687,8 +691,9 @@ void *Writer(void *arg) {
             if (start < boundary && start + writesize >= boundary) {
                 writesize = boundary - start;
             }
-            //writesize = write(1, buf + start, writesize);
-            // TODO publish to kafka here
+
+//             writesize = write(1, buf + start, writesize);
+            kafka_produce_message(buf + start, writesize);
         }
         if (writesize == -1 && errno == EINTR) writesize = 0;
         if (writesize < 0) {
@@ -918,8 +923,10 @@ int main(int argc, char *argv[], char *envp[]) {
                     break;
                 case 'z':
                     t = atoi(optarg);    /* specify goal write size 2^n */
-                    for (bitmask = 1; bitmask <= 65536; bitmask *= 2) {
-                        if (t == bitmask) WriteSize = t;
+                    // default on for condition was 65536. why? is limited?
+                    for (bitmask = 1; bitmask <= 1048576; bitmask *= 2) {
+                        if (t == bitmask)
+                            WriteSize = t;
                     }
                     if (WriteSize != t) {
                         fprintf(stderr, "%s: -z number must be a power of 2\n",
@@ -988,18 +995,6 @@ int main(int argc, char *argv[], char *envp[]) {
     d_snap_len = snap_len + gre_hdrlen;
     if (d_snap_len <= 0 || d_snap_len > SNAP_LEN)
         d_snap_len = SNAP_LEN;
-
-    if (isatty(1) && !just_copy && !odir) {
-        fprintf(stderr, "%s:\tSending raw pcap data to a terminal is not a "
-                        "good idea.\n\tIf you really want to do that, pipe %s through "
-                        "cat but you\n\tprobably want to redirect stdout to a file or "
-                        "another program instead.\n\tPerhaps you meant to pipe into "
-                        "'tcpdump -r-' or 'ngrep -I-' ?\n", progname, progname);
-        if (argc == 1)
-            usage();
-
-        exit(1);
-    }
 
     /*
      * Advisory locking logic
