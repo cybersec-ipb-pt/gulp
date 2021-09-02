@@ -522,7 +522,7 @@ void *Reader(void *arg) {
             date_info->tm_mday, date_info->tm_hour, date_info->tm_min, date_info->tm_sec);
 
     FILE *json_file = fopen(file_name, "w");
-    fprintf(json_file, "{\n\"method: \"gulp\"\n\"capture_started\": %ld.%ld\n", CAPTURE_STARTED.tv_sec,
+    fprintf(json_file, "{\n\"method\": \"gulp\"\n\"capture_started\": %ld.%ld\n", CAPTURE_STARTED.tv_sec,
             CAPTURE_STARTED.tv_usec);
     fprintf(json_file, "\"capture_ended\": %ld.%ld\n", CAPTURE_ENDED.tv_sec, CAPTURE_ENDED.tv_usec);
     fprintf(json_file, "\"kafka_ended\": %ld.%ld\n", KAFKA_ENDED.tv_sec, KAFKA_ENDED.tv_usec);
