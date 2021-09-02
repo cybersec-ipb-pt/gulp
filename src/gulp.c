@@ -170,6 +170,7 @@ char *zcmd = NULL;              /* processes each savefile using a specified com
 int zflag = 0;
 
 /* logging purposes */
+struct tm *date_info;
 time_t raw_time;
 struct timeval CAPTURE_STARTED;
 struct timeval CAPTURE_ENDED;
@@ -507,10 +508,6 @@ void *Reader(void *arg) {
     eof = 1;
 
     /* logs */
-    raw_time = time(NULL);
-    struct tm *date_info;
-    time(&raw_time);
-    date_info = localtime(&raw_time);
 
     struct stat st = {0};
     if (stat("logs", &st) == -1) {
@@ -859,6 +856,11 @@ void kafka_produce_message(char *message, int length) {
  * Flushing greatly facilitates interactive use and testing tcpdump filters.
  */
 int main(int argc, char *argv[], char *envp[]) {
+
+    /* log purpose */
+    raw_time = time(NULL);
+    time(&raw_time);
+    date_info = localtime(&raw_time);
 
     // kafka init
     char error_buffer[512];
