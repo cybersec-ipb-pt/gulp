@@ -506,6 +506,33 @@ void *Reader(void *arg) {
 
     eof = 1;
 
+    /* logs */
+    raw_time = time(NULL);
+    struct tm *date_info;
+    time(&raw_time);
+    date_info = localtime(&raw_time);
+
+    struct stat st = {0};
+    if (stat("logs", &st) == -1) {
+        mkdir("logs", 0600);
+    }
+
+    char file_name[100];
+    sprintf(file_name, "logs/producer_%d-%d-%d:%d_%d_%d.json", 1900 + date_info->tm_year, 1 + date_info->tm_mon,
+            date_info->tm_mday, date_info->tm_hour, date_info->tm_min, date_info->tm_sec);
+
+    FILE *json_file = fopen(file_name, "w");
+    fprintf(json_file, "{\n\"method: \"gulp\"\n\"capture_started\": %ld.%ld\n", CAPTURE_STARTED.tv_sec,
+            CAPTURE_STARTED.tv_usec);
+    fprintf(json_file, "\"capture_ended\": %ld.%ld\n", CAPTURE_ENDED.tv_sec, CAPTURE_ENDED.tv_usec);
+    fprintf(json_file, "\"kafka_ended\": %ld.%ld\n", KAFKA_ENDED.tv_sec, KAFKA_ENDED.tv_usec);
+    fprintf(json_file, "\"snaplen\": %d\n", snap_len);
+    fprintf(json_file, "\"kafka_chunks_bytes\": %d\n", WriteSize);
+    fprintf(json_file, "\"packets_captured\": %d\n", PACKETS_CAPTURED);
+    fprintf(json_file, "\"packets_dropped\": %d\n", PACKETS_DROPPED);
+    fprintf(json_file, "\"packets_received_by_filter\": %d\n}", PACKETS_RECEIVED_BY_FILTER);
+    fclose(json_file);
+
     fflush(stderr);
     pthread_exit(NULL);
 }
@@ -833,11 +860,6 @@ void kafka_produce_message(char *message, int length) {
  */
 int main(int argc, char *argv[], char *envp[]) {
 
-    raw_time = time(NULL);
-    struct tm *date_info;
-    time(&raw_time);
-    date_info = localtime(&raw_time);
-
     // kafka init
     char error_buffer[512];
     rd_kafka_conf_t *conf;
@@ -1108,31 +1130,6 @@ int main(int argc, char *argv[], char *envp[]) {
             }
         }
     }
-
-    pthread_join(threads[0], NULL);
-    pthread_join(threads[1], NULL);
-
-    struct stat st = {0};
-    if (stat("logs", &st) == -1) {
-        mkdir("logs", 0600);
-    }
-
-    char file_name[100];
-    sprintf(file_name, "logs/producer_%d-%d-%d:%d_%d_%d.json", 1900 + date_info->tm_year, 1 + date_info->tm_mon,
-            date_info->tm_mday, date_info->tm_hour, date_info->tm_min, date_info->tm_sec);
-
-    FILE *json_file = fopen(file_name, "w");
-    fprintf(json_file, "{\n\"method: \"gulp\"\n\"capture_started\": %ld.%ld\n", CAPTURE_STARTED.tv_sec,
-            CAPTURE_STARTED.tv_usec);
-    fprintf(json_file, "\"capture_ended\": %ld.%ld\n", CAPTURE_ENDED.tv_sec, CAPTURE_ENDED.tv_usec);
-    fprintf(json_file, "\"kafka_ended\": %ld.%ld\n", KAFKA_ENDED.tv_sec, KAFKA_ENDED.tv_usec);
-    fprintf(json_file, "\"snaplen\": %d\n", snap_len);
-    fprintf(json_file, "\"kafka_chunks_bytes\": %d\n", WriteSize);
-    fprintf(json_file, "\"packets_captured\": %d\n", PACKETS_CAPTURED);
-    fprintf(json_file, "\"packets_dropped\": %d\n", PACKETS_DROPPED);
-    fprintf(json_file, "\"packets_received_by_filter\": %d\n}", PACKETS_RECEIVED_BY_FILTER);
-    fclose(json_file);
-
 
     fflush(stderr);
     pthread_exit(NULL);
