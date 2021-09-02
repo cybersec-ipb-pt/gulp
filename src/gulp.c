@@ -75,6 +75,8 @@
 
 #endif
 
+#include <time.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -92,6 +94,7 @@
 #include <limits.h>
 #include <sys/wait.h>
 #include "settings.h"
+#include <sys/stat.h>
 
 #include <librdkafka/rdkafka.h>
 
@@ -165,6 +168,14 @@ int max_files = 0;        /* upper bound on filec */
 int volatile reader_ready = 0;    /* reader thread no longer needs root */
 char *zcmd = NULL;              /* processes each savefile using a specified command */
 int zflag = 0;
+
+/* logging purposes */
+time_t raw_time;
+struct timeval CAPTURE_STARTED;
+struct timeval CAPTURE_ENDED;
+struct timeval KAFKA_ENDED;
+int PACKETS_CAPTURED, PACKETS_DROPPED, PACKETS_RECEIVED_BY_FILTER;
+
 
 static void child_cleanup(int); /* to avoid zombies, see below */
 void kafka_produce_message(char *, int);
@@ -432,21 +443,19 @@ void *Reader(void *arg) {
 
         append((char *) &fh, sizeof(fh), 0);
 
+        /* register the start of the capture */
+        gettimeofday(&CAPTURE_STARTED, NULL);
+
+        fprintf(stderr, "Capturing...\n");
+
         /* now we can set our callback function */
         pcap_loop(handle, num_packets, got_packet, NULL);
 
-        fprintf(stderr, "Flushing final messages\n");
-        rd_kafka_flush(rk, 10 * 1000 /* wait for max 10 seconds */);
-
-        /* If the output queue is still not empty there is an issue
-         * with producing messages to the clusters. */
-        if (rd_kafka_outq_len(rk) > 0)
-            fprintf(stderr, "%% %d message(s) were not delivered\n", rd_kafka_outq_len(rk));
-
-        /* Destroy kafka producer instance */
-        rd_kafka_destroy(rk);
+        gettimeofday(&CAPTURE_ENDED, NULL);
 
         fprintf(stderr, "\n%d packets captured\n", captured);
+        PACKETS_CAPTURED = captured;
+
         if (ignored > 0) {
             fprintf(stderr, "%d packets ignored (too small to decapsulate)\n",
                     ignored);
@@ -454,6 +463,8 @@ void *Reader(void *arg) {
         if (got_stats) {
             (void) fprintf(stderr, "%d packets received by filter\n", pcs.ps_recv);
             (void) fprintf(stderr, "%d packets dropped by kernel\n", pcs.ps_drop);
+            PACKETS_RECEIVED_BY_FILTER = pcs.ps_recv;
+            PACKETS_DROPPED = pcs.ps_drop;
 
             /*
              * if packets dropped, check/warn if pcap socket buffer is too small
@@ -494,6 +505,7 @@ void *Reader(void *arg) {
             100.0 * (double) maxbuffered / (double) (ringsize), ringsize / 1024 / 1024);
 
     eof = 1;
+
     fflush(stderr);
     pthread_exit(NULL);
 }
@@ -712,6 +724,21 @@ void *Writer(void *arg) {
         pushed = push;
     }
     if (odir) process_savefile(wfile);
+
+
+    fprintf(stderr, "Flushing final messages\n");
+    rd_kafka_flush(rk, 10 * 1000 /* wait for max 10 seconds */);
+
+    gettimeofday(&KAFKA_ENDED, NULL);
+
+    /* If the output queue is still not empty there is an issue
+     * with producing messages to the clusters. */
+    if (rd_kafka_outq_len(rk) > 0)
+        fprintf(stderr, "%% %d message(s) were not delivered\n", rd_kafka_outq_len(rk));
+
+    /* Destroy kafka producer instance */
+    rd_kafka_destroy(rk);
+
     pthread_exit(NULL);
 }
 
@@ -805,6 +832,11 @@ void kafka_produce_message(char *message, int length) {
  * Flushing greatly facilitates interactive use and testing tcpdump filters.
  */
 int main(int argc, char *argv[], char *envp[]) {
+
+    raw_time = time(NULL);
+    struct tm *date_info;
+    time(&raw_time);
+    date_info = localtime(&raw_time);
 
     // kafka init
     char error_buffer[512];
@@ -1076,6 +1108,31 @@ int main(int argc, char *argv[], char *envp[]) {
             }
         }
     }
+
+    pthread_join(threads[0], NULL);
+    pthread_join(threads[1], NULL);
+
+    struct stat st = {0};
+    if (stat("logs", &st) == -1) {
+        mkdir("logs", 0600);
+    }
+
+    char file_name[100];
+    sprintf(file_name, "logs/producer_%d-%d-%d:%d_%d_%d.json", 1900 + date_info->tm_year, 1 + date_info->tm_mon,
+            date_info->tm_mday, date_info->tm_hour, date_info->tm_min, date_info->tm_sec);
+
+    FILE *json_file = fopen(file_name, "w");
+    fprintf(json_file, "{\n\"method: \"gulp\"\n\"capture_started\": %ld.%ld\n", CAPTURE_STARTED.tv_sec,
+            CAPTURE_STARTED.tv_usec);
+    fprintf(json_file, "\"capture_ended\": %ld.%ld\n", CAPTURE_ENDED.tv_sec, CAPTURE_ENDED.tv_usec);
+    fprintf(json_file, "\"kafka_ended\": %ld.%ld\n", KAFKA_ENDED.tv_sec, KAFKA_ENDED.tv_usec);
+    fprintf(json_file, "\"snaplen\": %d\n", snap_len);
+    fprintf(json_file, "\"kafka_chunks_bytes\": %d\n", WriteSize);
+    fprintf(json_file, "\"packets_captured\": %d\n", PACKETS_CAPTURED);
+    fprintf(json_file, "\"packets_dropped\": %d\n", PACKETS_DROPPED);
+    fprintf(json_file, "\"packets_received_by_filter\": %d\n}", PACKETS_RECEIVED_BY_FILTER);
+    fclose(json_file);
+
 
     fflush(stderr);
     pthread_exit(NULL);
